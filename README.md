@@ -8,24 +8,39 @@ aioveu-docker
 
 
 
-├── mysql
-│   ├── conf.d
-│   │   └── custom.cnf
-│   ├── entrypoint-custom.sh  # 自定义入口脚本
-│   ├── init.d
-│   │   └── init.sql          # 正确的初始化脚本
+├── mysql                      #1.mysql数据库                       
+│   ├── conf
+│   │   └── my.cnf
 │   └── data
-├── nacos
+├── nacos                      #2.nacos  注册中心
 │   ├── conf
 │   │   └── application.properties
+│   │   └── jdbc.properties  nacos-logback.xml
+│   │   └── nacos-logback.xml
+│   └── datadir
+│   └── logs
+│   └── wait-for-mysql.sh
+├── seata                     #3.seata  分布式事务
+│   ├── config
+│   │   └── file.conf
+│   │   └── registry.conf
+│   ├── lib
+│   └── logs
+├── redis                   #4.redis  缓存
+│   ├── conf
+│   │   └── redis.conf
 │   └── data
-└── seata/
-│   ├── config/
-│   ├── registry.conf
-│   └── file.conf
-├── logs/
-└── scripts/
-└── wait-for-services.sh
+├── minio                   #5.minio  云存储
+├── rabbitmq                #6.rabbitmq  消息队列
+├── xxl-job-admin           #7.xxl-job-admin
+├── gateway                 #1.gateway  网关
+├── auth                    #2.auth  安全中心
+├── system                  #3.system  系统设置
+├── oms                     #4.oms  订单服务
+├── pms                     #5.pms  商品服务
+├── sms                     #6.sms  营销服务
+├── ums                     #7.ums  会员服务
+ 
 
 ├── docker-compose.yaml                     # 创建一个名为 "aioveu-server" 的桥接网络，在同一个网络中的容器可以通过容器名互相访问
 ├── run.md                                  ## 安装
