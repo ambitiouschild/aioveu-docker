@@ -1,12 +1,13 @@
 # 创建一个名为 "aioveu-server" 的桥接网络，在同一个网络中的容器可以通过容器名互相访问
 networks:
-  aioveu-server:
+  aioveu-docker:
     driver: bridge
 
+# 镜像image7个 1.mysql 2.nacos 3.seata 4.redis 5.minio 6.rabbitmq 7.xxl-job-admin
 services:
-  mysql:
+  mysql:   #等一等不要着急，创建密码和数据持久化需要时间   #/usr/sbin/mysqld: ready for connections. Version: '8.0.29'  socket: '/var/lib/mysql/mysql.sock'  port: 3306  MySQL Community Server - GPL.
     image: mysql:8.0.29
-    container_name: aioveu-server-mysql
+    container_name: aioveu-lss-mysql   # 容器名称，在同一个Docker网络中，其他容器可以通过这个名称访问
     restart: unless-stopped # 重启策略：除非手动停止容器，否则自动重启
     environment:
       - TZ=Asia/Shanghai
@@ -15,55 +16,283 @@ services:
     volumes:
       - ./mysql/conf/my.cnf:/etc/my.cnf # 挂载 my.cnf 文件到容器的指定路径
       - ./mysql/data:/var/lib/mysql # 持久化 MySQL 数据
-      - ../sql/mysql:/docker-entrypoint-initdb.d # 初始化 SQL 脚本目录
+      - ../sql/mysql8:/docker-entrypoint-initdb.d # 初始化 SQL 脚本目录
     ports:
-      - 3308:3306
+      - 3326:3306
     networks:
-      - aioveu-server # 加入 "aioveu-aioveu" 网络
+      - aioveu-docker # 加入 "aioveu-docker" 网络
+    healthcheck: # 可以添加健康检查
+      test: [ "CMD", "mysqladmin", "ping", "-h", "aioveu-lss-mysql", "-u", "root", "-p775825" ]
+      interval: 5s
+      timeout: 10s
+      retries: 10
+
+  nacos: #docker exec -it aioveu-server-nacos-server ping mysql
+    image: nacos/nacos-server:v2.2.3 # 使用 Nacos 2.2.3 镜像
+    container_name: aioveu-lss-nacos-server
+    restart: unless-stopped # 重启策略：除非手动停止容器，否则自动重启
+    environment:
+      # 数据库连接配置  使用内置数据库配置方式   由于我们使用了配置文件，可以移除环境变量中关于数据库的配置，只保留必要的环境变量：
+      - MODE=standalone
+      # 添加关键环境变量
+      - DB_NUM=1  # 解决 db.num is null # 错误：值被引号包裹，会导致值变成字符串 ""1""
+      - JVM_XMS=2g  #-Xms 2g 中空格导致 JVM 无法识别
+      - JVM_XMX=2g #JVM 内存参数格式应为 -Xms2g（无空格）   # 注意：在Nacos 2.0版本中，JVM_XMS等环境变量会直接转换为JVM参数，无需手动添加空格。
+      # 等待数据库初始化，这可以通过一个启动脚本实现
+    #根据Nacos的官方文档，在2.x版本中，配置数据库连接的方式有所变化，特别是不再支持通过 SPRING_DATASOURCE_PLATFORM
+    #等环境变量来配置外部数据库。
+    #在Nacos 2.x版本中，配置外部数据库的正确方式是使用配置文件 application.properties。
+    #因此，我们需要挂载一个自定义的 application.properties 文件到容器中，而不是通过环境变量来配置数据库。
+    #1.移除通过环境变量配置数据库的方式（即移除 SPRING_DATASOURCE_PLATFORM, MYSQL_SERVICE_* 等环境变量）。
+    #2.通过挂载配置文件 application.properties 来配置数据库连接。
+    volumes: # 挂载关键配置文件
+      - ./nacos/datadir:/home/nacos/data
+      - ./nacos/conf:/home/nacos/conf
+      - ./nacos/logs:/home/nacos/logs
+      - ./nacos/wait-for-mysql.sh:/wait-for-mysql.sh  # 挂载等待脚本
+    ports:
+      - 8868:8848
+      - 9869:9848  # 必须暴露9848端口
+    networks:
+      - aioveu-docker # 加入 "aioveu-server" 网络
+    depends_on:
+      - mysql # 保证 MySQL 服务先启动  #由于depends_on只能保证mysql容器启动，并不能保证mysql服务可用。
+       #因此，我们可能需要一个脚本来等待mysql服务可用后再启动nacos。我们可以使用官方推荐的wait-for-it.sh脚本或者自己写一个循环检测。
+    command: sh -c "sh /wait-for-mysql.sh && bash /home/nacos/bin/startup.sh -m standalone"
+
+
+  seata:
+    image: seataio/seata-server:1.7.1
+    container_name: aioveu-seata-server
+    restart: unless-stopped #  指定了容器的重启策略，除了手动停止容器，其他情况都自动重启容器
+    environment:
+      # Nacos 注册中心配置
+      SEATA_REGISTRY_TYPE: nacos   # 注意这里改为SEATA_REGISTRY_TYPE（注册类型）
+      SEATA_REGISTRY_NACOS_APPLICATION: aioveu-seata-server
+      SEATA_REGISTRY_NACOS_SERVER_ADDR: nacos:8848
+      SEATA_REGISTRY_NACOS_GROUP: SEATA_GROUP
+      SEATA_REGISTRY_NACOS_CLUSTER: default
+      SEATA_REGISTRY_NACOS_USERNAME: admin
+      SEATA_REGISTRY_NACOS_PASSWORD: 775825
+
+      # Nacos 配置中心配置
+      SEATA_CONFIG_TYPE: nacos     # 配置中心类型
+      SEATA_CONFIG_NACOS_SERVER_ADDR: nacos:8848
+      SEATA_CONFIG_NACOS_GROUP: SEATA_GROUP
+      SEATA_CONFIG_NACOS_DATA_ID: seataServer.properties
+      SEATA_CONFIG_NACOS_USERNAME: admin
+      SEATA_CONFIG_NACOS_PASSWORD: 775825
+
+      # 数据库驱动类路径设置
+      JAVA_OPTS: >-
+        -Dloader.path=/seata-server/lib
+        -Dlog.home=/root/logs/seata
+        -Xmx512m -Xms256m
+
+      # 等待依赖服务
+      WAIT_FOR_SERVICES: "mysql:3306 nacos:8848"
+      WAIT_TIMEOUT: 180
+
+    volumes:
+      # 挂载registry.conf，这样Seata会使用这个配置连接Nacos
+      - ./seata/config/registry.conf:/seata-server/resources/registry.conf
+      #      - ./seata/config:/seata-server/resources  # 挂载自定义配置文件  # 挂载配置文件，其中包含registry.conf和file.conf
+      # 挂载MySQL驱动
+      - ./lib/mysql-connector-j-8.0.33.jar:/seata-server/lib/mysql-connector-java.jar
+      # 挂载日志目录
+      - ./seata/logs:/root/logs/seata
+    ports:
+      - 8092:8091   # Seata服务端口  # 将宿主机的8092映射到容器的8091
+      - 7092:7091  # Seata控制台端口（1.7.1版本开始有控制台）
+    networks:
+      - aioveu-docker
+    depends_on:
+      mysql:
+        condition: service_healthy
+      nacos:
+        condition: service_started
 
   redis:
     image: redis:7.2.3
-    container_name: aioveu-server-redis
-    restart: unless-stopped
-    command: redis-server /etc/redis/redis.conf --requirepass 775825 --appendonly no # 启动 Redis 服务并添加密码为：123456，默认不开启 Redis AOF 方式持久化配置
+    container_name: aioveu-redis
+    restart: unless-stopped # 重启策略：除非手动停止容器，否则自动重启
+    command: redis-server /etc/redis/redis.conf  --pidfile /data/redis.pid # 启动 Redis 服务并添加密码为--requirepass 775825，默认不开启 Redis AOF 方式持久化配置
     environment:
       - TZ=Asia/Shanghai
     volumes:
       - ./redis/data:/data
       - ./redis/config/redis.conf:/etc/redis/redis.conf
     ports:
-      - 6379:6379
+      - 6380:6379
     networks:
-      - aioveu-server
+      - aioveu-docker
+      #NOAUTH Authentication required 应用程序未使用密码
+      #WRONGPASS invalid username-password pair  密码不匹配
+      #Connection refused: no further information 连接地址错误
 
   minio:
     image: minio/minio:latest
-    container_name: minio
-    restart: unless-stopped
-    command: server /data --console-address ":9001"
+    container_name: aioveu-minio
+    restart: unless-stopped # 重启策略：除非手动停止容器，否则自动重启
+    command: server /data --console-address ":9090"
     ports:
-      - 9000:9000
-      - 9001:9001
+      - 9001:9000
+      - 9091:9090
     environment:
       - TZ=Asia/Shanghai
       - LANG=en_US.UTF-8
-      - MINIO_ROOT_USER=minioadmin
-      - MINIO_ROOT_PASSWORD=minioadmin
+      - MINIO_ROOT_USER=minioadminlss
+      - MINIO_ROOT_PASSWORD=minioadminlss
     volumes:
       - ./minio/data:/data
       - ./minio/config:/root/.minio
     networks:
-      - aioveu-server
+      - aioveu-docker
 
-  xxl-job-admin:
-    image: xuxueli/xxl-job-admin:2.4.0
-    container_name: xxl-job-admin
+  rabbitmq:
+    image: rabbitmq:management
+    container_name: aioveu-rabbitmq
     restart: unless-stopped
     environment:
-      PARAMS: '--spring.datasource.url=jdbc:mysql://mysql:3306/xxl_job?useUnicode=true&characterEncoding=UTF-8&autoReconnect=true&serverTimezone=Asia/Shanghai --spring.datasource.username=root --spring.datasource.password=123456 --spring.datasource.driver-class-name=com.mysql.cj.jdbc.Driver'
+      - TZ=Asia/Shanghai
+      - RABBITMQ_DEFAULT_USER=adminlss
+      - RABBITMQ_DEFAULT_PASS=adminlss
+    ports:
+      - 5673:5672
+      - 15673:15672
+    networks:
+      - aioveu-docker # 加入 "mall" 网络
+
+  xxl-job-admin:
+    image: xuxueli/xxl-job-admin:2.4.0   # https://hub.docker.com/r/xuxueli/xxl-job-admin/tags
+    container_name: aioveu-xxl-job-admin
+    restart: unless-stopped #  指定了容器的重启策略，除了手动停止容器，其他情况都自动重启容器
+    environment:
+      # 数据库配置
+      - spring.datasource.url=jdbc:mysql://mysql:3306/aioveu_xxl_job?useUnicode=true&characterEncoding=UTF-8&autoReconnect=true&serverTimezone=Asia/Shanghai
+      - spring.datasource.username=root
+      - spring.datasource.password=775825
+      - spring.datasource.driver-class-name=com.mysql.cj.jdbc.Driver
+
     volumes:
       - ./xxljob/logs:/data/applogs
     ports:
-      - 8080:8080
+      - 8181:8080
     networks:
-      - aioveu-server
+      - aioveu-docker
+  #
+  gateway:
+    image: aioveu-gateway:latest
+    container_name: aioveu-gateway
+    #    build:
+    #      context: .
+    #      dockerfile: Dockerfile
+    ports:
+      - "9999:9999"
+    networks:
+      - aioveu-docker
+    depends_on:
+      - mysql
+      - nacos
+  #
+  auth:
+    image: aioveu-auth:v0.0.3
+    container_name: aioveu-auth
+    #    build:
+    #      context: .
+    #      dockerfile: Dockerfile
+    ports:
+      - "9003:9003"
+    networks:
+      - aioveu-docker
+    depends_on:
+      - mysql
+      - nacos
+      - gateway
+
+  system:
+    image: aioveu-system:v0.0.3
+    container_name: aioveu-system
+    #    build:
+    #      context: .
+    #      dockerfile: Dockerfile
+    ports:
+      - "8801:8800"
+    networks:
+      - aioveu-docker
+    depends_on:
+      - mysql
+      - nacos
+      - gateway
+      - auth
+
+  oms:
+    image: aioveu-oms:v0.0.3
+    container_name: aioveu-oms
+    ports:
+      - "8813:8803"
+    networks:
+      - aioveu-docker
+    depends_on:
+      - mysql
+      - nacos
+      - gateway
+      - auth
+
+  pms:
+    image: aioveu-pms:v0.0.3
+    container_name: aioveu-pms
+    ports:
+      - "8812:8802"
+    networks:
+      - aioveu-docker
+    depends_on:
+      - mysql
+      - nacos
+      - gateway
+      - auth
+  sms:
+    image: aioveu-sms:v0.0.3
+    container_name: aioveu-sms
+    ports:
+      - "8814:8804"
+    networks:
+      - aioveu-docker
+    depends_on:
+      - mysql
+      - nacos
+      - gateway
+      - auth
+  ums:
+    image: aioveu-ums:v0.0.3
+    container_name: aioveu-ums
+    ports:
+      - "8811:8801"
+    networks:
+      - aioveu-docker
+    depends_on:
+      - mysql
+      - nacos
+      - gateway
+      - auth
+
+      #但是，Seata的配置加载优先级为：配置中心 > 环境变量 > 配置文件（file.conf）。
+      #如果配置中心没有配置，则应该回退到环境变量或配置文件。
+      #如果我们不使用配置中心，可以强制Seata使用本地配置。在环境变量中设置：
+
+      #由于我们已经设置了配置中心为Nacos，因此Seata会从Nacos获取配置。
+      #但是，这里有一个循环依赖：Seata在启动时需要从Nacos获取配置，而Nacos又依赖于MySQL，而Seata本身也依赖于MySQL。
+      #因此，我们需要确保Nacos已经启动并且配置了Seata的配置。
+      #所以，我们需要在Nacos中预先配置Seata的配置（Data ID为seataServer.properties，Group为SEATA_GROUP）。如果Nacos中没有该配置，Seata会启动失败。
+
+      #另一种做法是：不使用配置中心，而是使用配置文件（即file.conf）。我们可以通过挂载的配置文件（在./seata/config目录下）来配置Seata。这样就不需要在Nacos中预先配置。
+
+      #根据环境变量的设置，我们尝试同时使用环境变量和配置文件。但是，如果配置中心存在，Seata会优先使用配置中心。
+
+      #docker-compose没有内置的支持，所以我们这里不展开复杂的初始化。我们选择另一种方式：不使用配置中心，而是通过环境变量和挂载配置文件来配置Seata。
+
+      # 由于我们使用文件配置，所以去掉配置中心相关的环境变量，或者覆盖为file
+#      - SEATA_CONFIG_REGISTRY_TYPE=file   # 注册中心配置方式：使用文件（registry.conf）
+#      - SEATA_CONFIG_CONFIG_TYPE=file      # 配置中心配置方式：使用文件
+
+
